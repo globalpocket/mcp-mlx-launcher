@@ -46,6 +46,10 @@ async def handle_list_tools() -> list[types.Tool]:
                         "description": "起動するモデル名 (例: mlx-community/Llama-3-8B-Instruct-4bit)",
                     },
                     "port": {"type": "integer", "description": "サーバーを起動するポート番号"},
+                    "memory_requirement_gb": {
+                        "type": "number",
+                        "description": "起動に必要な空きメモリの目安(GB)。未指定時はデフォルトで 4.0GB。"
+                    }
                 },
                 "required": ["model_name", "port"],
             },
@@ -82,22 +86,35 @@ async def handle_call_tool(
         servers = process_manager.get_running_servers()
         if not servers:
             return [types.TextContent(type="text", text="No running servers found.")]
-        # JSON文字列としてフォーマットして返す
         return [types.TextContent(type="text", text=json.dumps(servers, indent=2))]
 
     elif name == "launch_llm_server":
         model_name = arguments.get("model_name")
         port = arguments.get("port")
+        memory_requirement_gb = arguments.get("memory_requirement_gb", 4.0)
+        
         if not isinstance(model_name, str) or not isinstance(port, int):
             raise ValueError("Invalid arguments for launch_llm_server")
-        result_msg = process_manager.launch_server(model_name, port)
+        if not isinstance(memory_requirement_gb, (int, float)):
+            raise ValueError("memory_requirement_gb must be a number")
+            
+        # イベントループのブロッキングを防ぐため別スレッドで実行
+        result_msg = await asyncio.to_thread(
+            process_manager.launch_server, 
+            model_name, 
+            port, 
+            10, 
+            float(memory_requirement_gb)
+        )
         return [types.TextContent(type="text", text=result_msg)]
 
     elif name == "shutdown_llm_server":
         port = arguments.get("port")
         if not isinstance(port, int):
             raise ValueError("Port must be an integer")
-        result_msg = process_manager.shutdown_server(port)
+            
+        # イベントループのブロッキングを防ぐため別スレッドで実行
+        result_msg = await asyncio.to_thread(process_manager.shutdown_server, port)
         return [types.TextContent(type="text", text=result_msg)]
 
     else:
@@ -111,7 +128,7 @@ async def run():
             write_stream,
             InitializationOptions(
                 server_name="mcp-mlx-launcher",
-                server_version="0.3.0",
+                server_version="0.1.0",
                 capabilities=server.get_capabilities(
                     notification_options=NotificationOptions(),
                     experimental_capabilities={},

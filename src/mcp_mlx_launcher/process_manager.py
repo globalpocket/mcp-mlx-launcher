@@ -51,7 +51,10 @@ class MlxProcessManager:
 
     def is_model_cached(self, model_name: str) -> bool:
         """Hugging Faceのキャッシュディレクトリにモデルが存在するか確認する"""
-        cache_dir = Path("~/.cache/huggingface/hub").expanduser()
+        # 環境変数 HF_HOME を尊重し、設定されていなければデフォルトパスを使用
+        cache_base = os.environ.get("HF_HOME", "~/.cache/huggingface/hub")
+        cache_dir = Path(cache_base).expanduser()
+        
         # 例: "mlx-community/Llama-3" -> "models--mlx-community--Llama-3"
         folder_name = "models--" + model_name.replace("/", "--")
         model_path = cache_dir / folder_name
@@ -76,17 +79,16 @@ class MlxProcessManager:
             
         return active_servers
 
-    def launch_server(self, model_name: str, port: int, timeout: int = 10) -> str:
+    def launch_server(self, model_name: str, port: int, timeout: int = 10, memory_requirement_gb: float = 4.0) -> str:
         # ① 事前チェック: ポートの競合
         if self.is_port_in_use(port):
             return f"Error: Port {port} is already in use."
 
-        # ② 事前チェック: メモリ(OOM)クラッシュの予防 (最低4GBの空きを要求)
+        # ② 事前チェック: メモリ(OOM)クラッシュの予防 (指定されたGBの空きを要求)
         mem = psutil.virtual_memory()
         available_gb = mem.available / (1024 ** 3)
-        min_required_gb = 4.0
-        if available_gb < min_required_gb:
-            return f"Error: Insufficient memory. Only {available_gb:.2f}GB available, but at least {min_required_gb}GB is recommended to launch a new model safely."
+        if available_gb < memory_requirement_gb:
+            return f"Error: Insufficient memory. Only {available_gb:.2f}GB available, but at least {memory_requirement_gb}GB is requested to launch this model safely."
 
         # ③ モデルのキャッシュ確認
         is_cached = self.is_model_cached(model_name)

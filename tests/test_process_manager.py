@@ -1,5 +1,6 @@
 import pytest
 import time
+import os
 import psutil
 from unittest.mock import patch, MagicMock
 from mcp_mlx_launcher.process_manager import MlxProcessManager
@@ -16,7 +17,7 @@ def manager(tmp_path):
 
 def test_file_locking_and_migration(manager):
     """ファイルロックの動作と、古いデータフォーマットのマイグレーションテスト"""
-    # 古いフォーマットで保存
+    # 古いフォーマット（PIDのみ）で保存
     with open(manager.state_file, "w") as f:
         f.write('{"8080": 12345}')
     
@@ -53,14 +54,19 @@ def test_launch_server_port_in_use(manager):
 
 @patch("psutil.virtual_memory")
 def test_launch_server_insufficient_memory(mock_vmem, manager):
-    """メモリ不足時の起動ブロックテスト"""
+    """メモリ不足時の起動ブロックと、パラメータ変更のテスト"""
     mock_mem_obj = MagicMock()
-    mock_mem_obj.available = 2 * (1024 ** 3) # 2GB
+    mock_mem_obj.available = 2 * (1024 ** 3) # 2GBの空き
     mock_vmem.return_value = mock_mem_obj
     
     with patch.object(manager, "is_port_in_use", return_value=False):
+        # デフォルト (4.0GB要求) -> エラー
         result = manager.launch_server("test-model", 8080)
         assert "Insufficient memory" in result
+        
+        # パラメータ指定 (3.0GB要求) -> それでも2GBしかないのでエラー
+        result2 = manager.launch_server("test-model", 8080, memory_requirement_gb=3.0)
+        assert "Insufficient memory" in result2
 
 
 @patch("subprocess.Popen")
@@ -70,7 +76,7 @@ def test_launch_server_insufficient_memory(mock_vmem, manager):
 def test_launch_server_with_health_check_success(mock_cached, mock_vmem, mock_sleep, mock_popen, manager):
     """起動後、ポートが開放されるまで待機して成功するケース"""
     mock_mem_obj = MagicMock()
-    mock_mem_obj.available = 8 * (1024 ** 3) # 8GB
+    mock_mem_obj.available = 8 * (1024 ** 3) # 8GBの空き
     mock_vmem.return_value = mock_mem_obj
 
     mock_proc = MagicMock()
@@ -165,8 +171,17 @@ def test_launch_server_exception(mock_vmem, mock_popen, manager):
         assert "Error launching process: Unexpected failure" in result
 
 
+@patch("pathlib.Path.exists")
+def test_is_model_cached_env_var(mock_exists, manager):
+    """環境変数 HF_HOME を尊重するかテスト"""
+    mock_exists.return_value = True
+    with patch.dict(os.environ, {"HF_HOME": "/custom/hf/cache"}):
+        assert manager.is_model_cached("test/model") is True
+
+
 @patch("psutil.Process")
 def test_shutdown_server_success(mock_process, manager):
+    """正常なシャットダウンテスト"""
     manager._save_state({"8080": {"pid": 12345, "model": "test"}})
     
     mock_proc = MagicMock()
@@ -183,6 +198,7 @@ def test_shutdown_server_success(mock_process, manager):
 
 
 def test_shutdown_server_not_found(manager):
+    """存在しないポートの停止テスト"""
     manager._save_state({})
     result = manager.shutdown_server(8080)
     assert "Error: No running server found" in result
@@ -190,7 +206,7 @@ def test_shutdown_server_not_found(manager):
 
 @patch("psutil.Process")
 def test_shutdown_server_no_such_process(mock_process, manager):
-    """プロセスが既に存在しない(NoSuchProcess)場合のテスト"""
+    """プロセスが既にOS上に存在しない(NoSuchProcess)場合のクリーンアップテスト"""
     manager._save_state({"8080": {"pid": 12345, "model": "test"}})
     mock_process.side_effect = psutil.NoSuchProcess(12345)
     
@@ -222,7 +238,7 @@ def test_shutdown_server_timeout_expired(mock_process, manager):
 
 @patch("psutil.Process")
 def test_shutdown_server_general_exception(mock_process, manager):
-    """終了処理中に予期せぬエラーが発生した場合のテスト"""
+    """終了処理中に予期せぬエラー（権限不足等）が発生した場合のテスト"""
     manager._save_state({"8080": {"pid": 12345, "model": "test"}})
     mock_process.side_effect = Exception("Permission denied")
     
@@ -235,13 +251,13 @@ def test_shutdown_server_general_exception(mock_process, manager):
 
 @patch("psutil.pid_exists")
 def test_get_running_servers(mock_pid_exists, manager):
-    """稼働中のサーバー一覧取得と自動クリーンアップのテスト"""
+    """稼働中のサーバー一覧取得と、死んだプロセスの自動クリーンアップテスト"""
     manager._save_state({
         "8080": {"pid": 100, "model": "model-A"}, # 生きてる
         "8081": {"pid": 101, "model": "model-B"}, # 死んでる
     })
     
-    # pid 100はTrue、101はFalseを返す
+    # pid 100はTrue、101はFalseを返すようにモック
     mock_pid_exists.side_effect = lambda pid: pid == 100
     
     servers = manager.get_running_servers()
@@ -250,5 +266,6 @@ def test_get_running_servers(mock_pid_exists, manager):
     assert "8081" not in servers
     assert len(servers) == 1
     
+    # 状態ファイルからも101が自動削除されているか確認
     state = manager._load_state()
     assert "8081" not in state
