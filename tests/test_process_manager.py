@@ -14,13 +14,15 @@ def manager(tmp_path):
     return MlxProcessManager(state_dir=str(tmp_path))
 
 
-def test_file_locking(manager):
-    """ファイルロックが正常に動作し、状態を読み書きできるか"""
-    data = {"8080": 12345}
-    manager._save_state(data)
-    assert manager._load_state() == data
-    # lockファイルの残留確認は、filelockのバージョンやOSの自動クリーンアップ挙動により
-    # 失敗する可能性があるため削除しました。データが正しく読み書きできていればOKです。
+def test_file_locking_and_migration(manager):
+    """ファイルロックの動作と、古いデータフォーマットのマイグレーションテスト"""
+    # 古いフォーマットで保存
+    with open(manager.state_file, "w") as f:
+        f.write('{"8080": 12345}')
+    
+    state = manager._load_state()
+    assert state["8080"]["pid"] == 12345
+    assert state["8080"]["model"] == "unknown"
 
 
 def test_is_port_in_use_false(manager):
@@ -49,10 +51,28 @@ def test_launch_server_port_in_use(manager):
         assert "Error: Port 8080 is already in use" in result
 
 
+@patch("psutil.virtual_memory")
+def test_launch_server_insufficient_memory(mock_vmem, manager):
+    """メモリ不足時の起動ブロックテスト"""
+    mock_mem_obj = MagicMock()
+    mock_mem_obj.available = 2 * (1024 ** 3) # 2GB
+    mock_vmem.return_value = mock_mem_obj
+    
+    with patch.object(manager, "is_port_in_use", return_value=False):
+        result = manager.launch_server("test-model", 8080)
+        assert "Insufficient memory" in result
+
+
 @patch("subprocess.Popen")
 @patch("time.sleep", return_value=None)
-def test_launch_server_with_health_check_success(mock_sleep, mock_popen, manager):
+@patch("psutil.virtual_memory")
+@patch.object(MlxProcessManager, "is_model_cached", return_value=True)
+def test_launch_server_with_health_check_success(mock_cached, mock_vmem, mock_sleep, mock_popen, manager):
     """起動後、ポートが開放されるまで待機して成功するケース"""
+    mock_mem_obj = MagicMock()
+    mock_mem_obj.available = 8 * (1024 ** 3) # 8GB
+    mock_vmem.return_value = mock_mem_obj
+
     mock_proc = MagicMock()
     mock_proc.poll.return_value = None # 生存中
     mock_proc.pid = 9999
@@ -63,16 +83,21 @@ def test_launch_server_with_health_check_success(mock_sleep, mock_popen, manager
         result = manager.launch_server("test-model", 8080)
         
         assert "Successfully launched" in result
-        assert "9999" in result
         
         state = manager._load_state()
-        assert state["8080"] == 9999
+        assert state["8080"]["pid"] == 9999
+        assert state["8080"]["model"] == "test-model"
 
 
 @patch("subprocess.Popen")
 @patch("time.sleep", return_value=None)
-def test_launch_server_immediate_crash(mock_sleep, mock_popen, manager):
+@patch("psutil.virtual_memory")
+def test_launch_server_immediate_crash(mock_vmem, mock_sleep, mock_popen, manager):
     """起動直後にプロセスが終了してしまった場合のエラー検知"""
+    mock_mem_obj = MagicMock()
+    mock_mem_obj.available = 8 * (1024 ** 3)
+    mock_vmem.return_value = mock_mem_obj
+
     mock_proc = MagicMock()
     mock_proc.poll.return_value = 1 # エラー終了
     mock_popen.return_value = mock_proc
@@ -84,8 +109,14 @@ def test_launch_server_immediate_crash(mock_sleep, mock_popen, manager):
 
 @patch("subprocess.Popen")
 @patch("time.sleep", return_value=None)
-def test_launch_server_timeout_warning(mock_sleep, mock_popen, manager):
+@patch("psutil.virtual_memory")
+@patch.object(MlxProcessManager, "is_model_cached", return_value=True)
+def test_launch_server_timeout_warning(mock_cached, mock_vmem, mock_sleep, mock_popen, manager):
     """生存はしているがポートがなかなか開かない場合のタイムアウト警告"""
+    mock_mem_obj = MagicMock()
+    mock_mem_obj.available = 8 * (1024 ** 3)
+    mock_vmem.return_value = mock_mem_obj
+
     mock_proc = MagicMock()
     mock_proc.poll.return_value = None
     mock_proc.pid = 9999
@@ -99,8 +130,34 @@ def test_launch_server_timeout_warning(mock_sleep, mock_popen, manager):
 
 
 @patch("subprocess.Popen")
-def test_launch_server_exception(mock_popen, manager):
+@patch("time.sleep", return_value=None)
+@patch("psutil.virtual_memory")
+@patch.object(MlxProcessManager, "is_model_cached", return_value=False)
+def test_launch_server_download_warning(mock_cached, mock_vmem, mock_sleep, mock_popen, manager):
+    """未キャッシュ（ダウンロード中）の場合のメッセージテスト"""
+    mock_mem_obj = MagicMock()
+    mock_mem_obj.available = 8 * (1024 ** 3)
+    mock_vmem.return_value = mock_mem_obj
+
+    mock_proc = MagicMock()
+    mock_proc.poll.return_value = None
+    mock_proc.pid = 9999
+    mock_popen.return_value = mock_proc
+
+    with patch.object(manager, "is_port_in_use", return_value=False):
+        with patch("time.time", side_effect=[0, 11]):
+            result = manager.launch_server("test-model", 8080)
+            assert "being downloaded from Hugging Face" in result
+
+
+@patch("subprocess.Popen")
+@patch("psutil.virtual_memory")
+def test_launch_server_exception(mock_vmem, mock_popen, manager):
     """サブプロセス起動時に予期せぬエラーが発生した場合のテスト"""
+    mock_mem_obj = MagicMock()
+    mock_mem_obj.available = 8 * (1024 ** 3)
+    mock_vmem.return_value = mock_mem_obj
+
     mock_popen.side_effect = Exception("Unexpected failure")
     
     with patch.object(manager, "is_port_in_use", return_value=False):
@@ -110,7 +167,7 @@ def test_launch_server_exception(mock_popen, manager):
 
 @patch("psutil.Process")
 def test_shutdown_server_success(mock_process, manager):
-    manager._save_state({"8080": 12345})
+    manager._save_state({"8080": {"pid": 12345, "model": "test"}})
     
     mock_proc = MagicMock()
     mock_process.return_value = mock_proc
@@ -134,13 +191,12 @@ def test_shutdown_server_not_found(manager):
 @patch("psutil.Process")
 def test_shutdown_server_no_such_process(mock_process, manager):
     """プロセスが既に存在しない(NoSuchProcess)場合のテスト"""
-    manager._save_state({"8080": 12345})
+    manager._save_state({"8080": {"pid": 12345, "model": "test"}})
     mock_process.side_effect = psutil.NoSuchProcess(12345)
     
     result = manager.shutdown_server(8080)
     assert "Successfully shut down" in result
     
-    # 状態ファイルからは削除されていること
     state = manager._load_state()
     assert "8080" not in state
 
@@ -148,10 +204,9 @@ def test_shutdown_server_no_such_process(mock_process, manager):
 @patch("psutil.Process")
 def test_shutdown_server_timeout_expired(mock_process, manager):
     """terminate 後にタイムアウトし、kill が呼ばれる場合のテスト"""
-    manager._save_state({"8080": 12345})
+    manager._save_state({"8080": {"pid": 12345, "model": "test"}})
     
     mock_proc = MagicMock()
-    # wait 時に TimeoutExpired を発生させる
     mock_proc.wait.side_effect = psutil.TimeoutExpired(5, pid=12345)
     mock_process.return_value = mock_proc
     
@@ -159,7 +214,7 @@ def test_shutdown_server_timeout_expired(mock_process, manager):
     
     assert "Successfully shut down" in result
     mock_proc.terminate.assert_called_once()
-    mock_proc.kill.assert_called_once() # killが呼ばれたことを確認
+    mock_proc.kill.assert_called_once()
     
     state = manager._load_state()
     assert "8080" not in state
@@ -168,12 +223,32 @@ def test_shutdown_server_timeout_expired(mock_process, manager):
 @patch("psutil.Process")
 def test_shutdown_server_general_exception(mock_process, manager):
     """終了処理中に予期せぬエラーが発生した場合のテスト"""
-    manager._save_state({"8080": 12345})
+    manager._save_state({"8080": {"pid": 12345, "model": "test"}})
     mock_process.side_effect = Exception("Permission denied")
     
     result = manager.shutdown_server(8080)
     assert "Error during shutdown: Permission denied" in result
     
-    # エラー時は状態ファイルから削除されないこと
     state = manager._load_state()
     assert "8080" in state
+
+
+@patch("psutil.pid_exists")
+def test_get_running_servers(mock_pid_exists, manager):
+    """稼働中のサーバー一覧取得と自動クリーンアップのテスト"""
+    manager._save_state({
+        "8080": {"pid": 100, "model": "model-A"}, # 生きてる
+        "8081": {"pid": 101, "model": "model-B"}, # 死んでる
+    })
+    
+    # pid 100はTrue、101はFalseを返す
+    mock_pid_exists.side_effect = lambda pid: pid == 100
+    
+    servers = manager.get_running_servers()
+    
+    assert "8080" in servers
+    assert "8081" not in servers
+    assert len(servers) == 1
+    
+    state = manager._load_state()
+    assert "8081" not in state

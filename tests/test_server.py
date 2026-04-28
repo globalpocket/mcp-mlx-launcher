@@ -1,4 +1,5 @@
 import pytest
+import json
 from unittest.mock import patch
 from mcp_mlx_launcher.server import handle_list_tools, handle_call_tool
 
@@ -7,11 +8,25 @@ from mcp_mlx_launcher.server import handle_list_tools, handle_call_tool
 async def test_handle_list_tools():
     """定義されているツールの一覧とスキーマが正しく返却されるか"""
     tools = await handle_list_tools()
-    assert len(tools) == 3
+    assert len(tools) == 4
     names = [tool.name for tool in tools]
     assert "check_llm_status" in names
+    assert "list_running_servers" in names
     assert "launch_llm_server" in names
     assert "shutdown_llm_server" in names
+
+
+@pytest.mark.asyncio
+@patch("mcp_mlx_launcher.server.process_manager.get_running_servers")
+async def test_list_running_servers(mock_get_servers):
+    mock_get_servers.return_value = {"8080": {"pid": 123, "model": "test"}}
+    result = await handle_call_tool("list_running_servers", {})
+    assert "123" in result[0].text
+    assert "test" in result[0].text
+
+    mock_get_servers.return_value = {}
+    result = await handle_call_tool("list_running_servers", {})
+    assert result[0].text == "No running servers found."
 
 
 @pytest.mark.asyncio
