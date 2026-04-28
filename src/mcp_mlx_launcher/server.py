@@ -128,19 +128,29 @@ async def handle_call_tool(
 
 async def run():
     """標準入出力(stdio)を利用してMCPサーバーを起動します"""
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="mcp-mlx-launcher",
-                server_version="0.1.1",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
+    try:
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="mcp-mlx-launcher",
+                    server_version="0.2.0",
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ),
                 ),
-            ),
-        )
+            )
+    finally:
+        # サーバー終了時（切断時・クラッシュ時含む）に、起動中のプロセスを自動クリーンアップ
+        active_servers = process_manager.get_running_servers()
+        for port_str in active_servers.keys():
+            try:
+                process_manager.shutdown_server(int(port_str))
+            except Exception:
+                # 終了時のクリーンアップ処理の失敗は無視して続行する
+                pass
 
 
 def main():

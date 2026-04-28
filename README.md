@@ -10,6 +10,7 @@ This tool empowers AI agents (like Cline, Claude Desktop, etc.) to start local L
 - **Status Check**: Verify if a specific port is currently active and listening.
 - **Graceful Shutdown**: Safely terminate the LLM process running on a specific port.
 - **Apple Silicon Optimized**: Built specifically to manage MLX-based local models.
+- **Auto Cleanup**: Automatically cleans up and shuts down all managed LLM processes when the MCP server disconnects or shuts down, preventing resource leaks.
 
 ## Prerequisites
 
@@ -51,9 +52,6 @@ To use this server with your MCP client (e.g., Claude Desktop or Cline), add the
 Once connected, the MCP server provides the following tools to the AI agent:
 
 1. `check_llm_status(port: int)`: Returns `true` if a server is running on the specified port.
-2. `launch_llm_server(model_name: str, port: int)`: Launches an `mlx_lm.server` instance in the background.
-3. `shutdown_llm_server(port: int)`: Gracefully terminates the running LLM server on the given port.
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+2. `list_running_servers()`: Retrieves a list of all local LLM servers (ports and models) currently running in the background.
+3. `launch_llm_server(model_name: str, port: int, memory_requirement_gb: float = 4.0)`: Launches an `mlx_lm.server` instance in the background. Includes an optional memory requirement check to prevent out-of-memory errors.
+4. `shutdown_llm_server(port: int)`: Gracefully terminates the running LLM server on the given port.

@@ -1,7 +1,7 @@
 import pytest
 import json
-from unittest.mock import patch
-from mcp_mlx_launcher.server import handle_list_tools, handle_call_tool
+from unittest.mock import patch, AsyncMock, MagicMock
+from mcp_mlx_launcher.server import handle_list_tools, handle_call_tool, run
 
 
 @pytest.mark.asyncio
@@ -106,3 +106,47 @@ async def test_unknown_tool():
     """未知のツール呼び出しテスト"""
     with pytest.raises(ValueError, match="Unknown tool: invalid_tool"):
         await handle_call_tool("invalid_tool", {})
+
+
+@pytest.mark.asyncio
+@patch("mcp.server.stdio.stdio_server")
+@patch("mcp_mlx_launcher.server.server.run", new_callable=AsyncMock)
+@patch("mcp_mlx_launcher.server.process_manager.get_running_servers")
+@patch("mcp_mlx_launcher.server.process_manager.shutdown_server")
+async def test_run_cleanup_on_exit(mock_shutdown, mock_get_servers, mock_server_run, mock_stdio):
+    """サーバー正常終了時にプロセスが自動でクリーンアップされるかのテスト"""
+    mock_ctx = MagicMock()
+    mock_ctx.__aenter__.return_value = (MagicMock(), MagicMock())
+    mock_ctx.__aexit__.return_value = None
+    mock_stdio.return_value = mock_ctx
+
+    mock_get_servers.return_value = {"8080": {"pid": 111, "model": "test1"}}
+
+    await run()
+
+    mock_get_servers.assert_called_once()
+    mock_shutdown.assert_called_once_with(8080)
+
+
+@pytest.mark.asyncio
+@patch("mcp.server.stdio.stdio_server")
+@patch("mcp_mlx_launcher.server.server.run", new_callable=AsyncMock)
+@patch("mcp_mlx_launcher.server.process_manager.get_running_servers")
+@patch("mcp_mlx_launcher.server.process_manager.shutdown_server")
+async def test_run_cleanup_on_exception(mock_shutdown, mock_get_servers, mock_server_run, mock_stdio):
+    """サーバー異常終了時（例外発生時）にもプロセスが自動でクリーンアップされるかのテスト"""
+    mock_ctx = MagicMock()
+    mock_ctx.__aenter__.return_value = (MagicMock(), MagicMock())
+    mock_ctx.__aexit__.return_value = None
+    mock_stdio.return_value = mock_ctx
+
+    mock_server_run.side_effect = Exception("Server crash")
+    mock_get_servers.return_value = {"8080": {"pid": 111, "model": "test1"}, "8081": {"pid": 222, "model": "test2"}}
+
+    with pytest.raises(Exception, match="Server crash"):
+        await run()
+
+    mock_get_servers.assert_called_once()
+    assert mock_shutdown.call_count == 2
+    mock_shutdown.assert_any_call(8080)
+    mock_shutdown.assert_any_call(8081)
