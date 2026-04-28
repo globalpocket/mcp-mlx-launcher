@@ -1,0 +1,11 @@
+#!/bin/bash
+
+# uvを使用する場合（推奨・高速）
+uv venv
+source .venv/bin/activate
+uv pip install -e ".[dev]"
+
+# 標準のpipを使用する場合
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"

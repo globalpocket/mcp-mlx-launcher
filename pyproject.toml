@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-mlx-launcher"
+version = "0.1.0"
+description = "An MCP server to autonomously launch, manage, and shutdown local mlx-lm instances on Apple Silicon."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "mcp-mlx-launcher contributors" }
+]
+dependencies = [
+    "mcp>=1.2.0",
+    "mlx-lm>=0.20.0",
+    "psutil>=6.0.0",
+]
+
+[project.scripts]
+mcp-mlx-launcher = "mcp_mlx_launcher.server:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.3.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_mlx_launcher"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"

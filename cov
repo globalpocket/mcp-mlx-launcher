@@ -1,0 +1,3 @@
+#!/bin/bash
+source .venv/bin/activate
+PYTHONPATH=src pytest --cov=src/mcp_gateway --cov-report=html tests/
