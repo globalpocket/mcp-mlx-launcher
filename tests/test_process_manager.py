@@ -1,6 +1,7 @@
 import pytest
 import time
 import os
+import sys
 import psutil
 from unittest.mock import patch, MagicMock
 from mcp_mlx_launcher.process_manager import MlxProcessManager
@@ -74,7 +75,7 @@ def test_launch_server_insufficient_memory(mock_vmem, manager):
 @patch("psutil.virtual_memory")
 @patch.object(MlxProcessManager, "is_model_cached", return_value=True)
 def test_launch_server_with_health_check_success(mock_cached, mock_vmem, mock_sleep, mock_popen, manager):
-    """起動後、ポートが開放されるまで待機して成功するケース"""
+    """起動後、ポートが開放されるまで待機して成功するケースと、sys.executableの検証"""
     mock_mem_obj = MagicMock()
     mock_mem_obj.available = 8 * (1024 ** 3) # 8GBの空き
     mock_vmem.return_value = mock_mem_obj
@@ -93,6 +94,14 @@ def test_launch_server_with_health_check_success(mock_cached, mock_vmem, mock_sl
         state = manager._load_state()
         assert state["8080"]["pid"] == 9999
         assert state["8080"]["model"] == "test-model"
+
+        # 追加: sys.executable が正しく使われているかを厳密にテスト
+        mock_popen.assert_called_once()
+        args, _ = mock_popen.call_args
+        called_cmd = args[0]
+        assert called_cmd[0] == sys.executable
+        assert called_cmd[1] == "-m"
+        assert called_cmd[2] == "mlx_lm.server"
 
 
 @patch("subprocess.Popen")

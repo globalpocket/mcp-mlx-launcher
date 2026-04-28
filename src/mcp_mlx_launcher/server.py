@@ -9,12 +9,14 @@ import mcp.server.stdio
 
 from mcp_mlx_launcher.process_manager import MlxProcessManager
 
+# サーバーインスタンスとプロセス管理インスタンスの初期化
 server = Server("mcp-mlx-launcher")
 process_manager = MlxProcessManager()
 
 
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
+    """AIエージェントに提供するツールの一覧とスキーマを定義します"""
     return [
         types.Tool(
             name="check_llm_status",
@@ -72,6 +74,7 @@ async def handle_list_tools() -> list[types.Tool]:
 async def handle_call_tool(
     name: str, arguments: dict[str, Any] | None
 ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
+    """AIエージェントから呼び出されたツールを実際に実行します"""
     if arguments is None and name != "list_running_servers":
         raise ValueError("Arguments are required")
 
@@ -79,6 +82,7 @@ async def handle_call_tool(
         port = arguments.get("port")
         if not isinstance(port, int):
             raise ValueError("Port must be an integer")
+        
         is_running = process_manager.is_port_in_use(port)
         return [types.TextContent(type="text", text=str(is_running).lower())]
 
@@ -86,6 +90,7 @@ async def handle_call_tool(
         servers = process_manager.get_running_servers()
         if not servers:
             return [types.TextContent(type="text", text="No running servers found.")]
+        # JSON文字列としてフォーマットして返す
         return [types.TextContent(type="text", text=json.dumps(servers, indent=2))]
 
     elif name == "launch_llm_server":
@@ -122,13 +127,14 @@ async def handle_call_tool(
 
 
 async def run():
+    """標準入出力(stdio)を利用してMCPサーバーを起動します"""
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await server.run(
             read_stream,
             write_stream,
             InitializationOptions(
                 server_name="mcp-mlx-launcher",
-                server_version="0.1.0",
+                server_version="0.1.1",
                 capabilities=server.get_capabilities(
                     notification_options=NotificationOptions(),
                     experimental_capabilities={},
@@ -138,6 +144,7 @@ async def run():
 
 
 def main():
+    """パッケージのエントリーポイント"""
     asyncio.run(run())
 
 
