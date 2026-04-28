@@ -2,18 +2,21 @@ import os
 import json
 import subprocess
 import psutil
+import time
 from pathlib import Path
+from filelock import FileLock
 
 
 class MlxProcessManager:
     """
     mlx_lm.server のプロセスを管理し、起動・停止・死活監視を行うクラス。
-    稼働中のプロセス情報は指定されたディレクトリの JSON ファイルに保存される。
+    ファイルロックと起動後の生存確認により、高い信頼性を確保する。
     """
 
     def __init__(self, state_dir: str = "~/.mcp-mlx-launcher"):
         self.state_dir = Path(state_dir).expanduser()
         self.state_file = self.state_dir / "state.json"
+        self.lock_file = self.state_dir / "state.json.lock"
         self._ensure_state_dir()
 
     def _ensure_state_dir(self):
@@ -23,17 +26,21 @@ class MlxProcessManager:
             self._save_state({})
 
     def _load_state(self) -> dict:
-        """状態ファイルから ポート -> PID のマッピングを読み込む"""
-        try:
-            with open(self.state_file, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, FileNotFoundError):
-            return {}
+        """状態ファイルから ポート -> PID のマッピングを読み込む（ロック付き）"""
+        with FileLock(self.lock_file):
+            try:
+                if not self.state_file.exists():
+                    return {}
+                with open(self.state_file, "r") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, FileNotFoundError):
+                return {}
 
     def _save_state(self, state: dict):
-        """ポート -> PID のマッピングを状態ファイルに保存する"""
-        with open(self.state_file, "w") as f:
-            json.dump(state, f, indent=4)
+        """ポート -> PID のマッピングを状態ファイルに保存する（ロック付き）"""
+        with FileLock(self.lock_file):
+            with open(self.state_file, "w") as f:
+                json.dump(state, f, indent=4)
 
     def is_port_in_use(self, port: int) -> bool:
         """指定されたポートが LISTEN 状態（使用中）かどうかを判定する"""
@@ -43,15 +50,12 @@ class MlxProcessManager:
                     return True
             return False
         except psutil.AccessDenied:
-            # 権限不足で全ての接続が見れない場合でも、ポートバインドを試みることで確認可能ですが、
-            # 通常のユーザーポート(>1024)であれば基本的に net_connections で確認可能です。
-            pass
-        return False
+            return False
 
-    def launch_server(self, model_name: str, port: int) -> str:
-        """mlx_lm.server をバックグラウンドで起動する"""
+    def launch_server(self, model_name: str, port: int, timeout: int = 10) -> str:
+        """mlx_lm.server を起動し、生存とポートの開放を確認する"""
         if self.is_port_in_use(port):
-            return f"Error: Port {port} is already in use. Please choose another port or shut down the existing process."
+            return f"Error: Port {port} is already in use."
 
         cmd = [
             "python",
@@ -64,7 +68,6 @@ class MlxProcessManager:
         ]
 
         try:
-            # バックグラウンドプロセスとして起動 (標準出力・エラーは/dev/nullへ捨て、セッションを切り離す)
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
@@ -72,12 +75,35 @@ class MlxProcessManager:
                 start_new_session=True,
             )
 
+            # 生存確認ループ (ヘルスチェック)
+            start_time = time.time()
+            is_verified = False
+            
+            while time.time() - start_time < timeout:
+                # 1. プロセスが即座にクラッシュしていないか確認
+                poll_result = process.poll()
+                if poll_result is not None:
+                    return f"Error: Process exited immediately with code {poll_result}. Check if the model name is correct."
+
+                # 2. ポートがリッスン状態になったか確認
+                if self.is_port_in_use(port):
+                    is_verified = True
+                    break
+                
+                time.sleep(0.5)
+
+            if not is_verified:
+                # タイムアウトしたがプロセスは生きている場合、警告付きで記録
+                msg_suffix = " (Warning: Port not yet listening, model might be loading)"
+            else:
+                msg_suffix = ""
+
             # 状態を記録
             state = self._load_state()
             state[str(port)] = process.pid
             self._save_state(state)
 
-            return f"Successfully launched mlx_lm.server for model '{model_name}' on port {port} (PID: {process.pid})."
+            return f"Successfully launched '{model_name}' on port {port} (PID: {process.pid}){msg_suffix}."
 
         except Exception as e:
             return f"Error launching process: {str(e)}"
@@ -88,26 +114,25 @@ class MlxProcessManager:
         port_str = str(port)
 
         if port_str not in state:
-            return f"Error: No running server found on port {port} in the local state."
+            return f"Error: No running server found on port {port}."
 
         pid = state[port_str]
 
         try:
             proc = psutil.Process(pid)
-            proc.terminate()  # SIGTERM を送信
-            proc.wait(timeout=5)  # 終了まで最大5秒待機
+            proc.terminate()
+            proc.wait(timeout=5)
         except psutil.NoSuchProcess:
-            # プロセスが既に存在しない場合は状態ファイルのみクリーンアップする
             pass
         except psutil.TimeoutExpired:
-            # 5秒待っても終了しない場合は強制終了 (SIGKILL)
             proc.kill()
         except Exception as e:
-            return f"Error shutting down process PID {pid}: {str(e)}"
+            return f"Error during shutdown: {str(e)}"
 
-        # 正常に終了（または既に終了していた）場合は状態ファイルから削除
-        del state[port_str]
-        self._save_state(state)
+        # クリーンアップ
+        state = self._load_state() # 最新の状態を再取得
+        if port_str in state:
+            del state[port_str]
+            self._save_state(state)
 
         return f"Successfully shut down server on port {port} (PID: {pid})."
-        

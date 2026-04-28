@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-mlx-launcher"
-version = "0.1.0"
+version = "0.2.0"
 description = "An MCP server to autonomously launch, manage, and shutdown local mlx-lm instances on Apple Silicon."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,6 +16,7 @@ dependencies = [
     "mcp>=1.2.0",
     "mlx-lm>=0.20.0",
     "psutil>=6.0.0",
+    "filelock>=3.13.0",
 ]
 
 [project.scripts]
