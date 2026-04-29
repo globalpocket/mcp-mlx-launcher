@@ -47,6 +47,38 @@ def test_is_port_in_use_access_denied(manager):
         assert manager.is_port_in_use(8080) is False
 
 
+@patch("psutil.virtual_memory")
+def test_get_system_info(mock_vmem, manager):
+    """システム情報取得のテスト"""
+    mock_mem_obj = MagicMock()
+    mock_mem_obj.total = 16 * (1024 ** 3)
+    mock_mem_obj.available = 8 * (1024 ** 3)
+    mock_vmem.return_value = mock_mem_obj
+
+    info = manager.get_system_info()
+    assert info["total_memory_gb"] == 16.0
+    assert info["available_memory_gb"] == 8.0
+    assert "system" in info
+    assert "machine" in info
+
+
+@patch("mcp_mlx_launcher.process_manager.snapshot_download")
+def test_download_model_success(mock_snapshot, manager):
+    """モデルダウンロードの成功テスト"""
+    result = manager.download_model("test-model")
+    assert "Successfully downloaded" in result
+    mock_snapshot.assert_called_once_with(repo_id="test-model")
+
+
+@patch("mcp_mlx_launcher.process_manager.snapshot_download")
+def test_download_model_error(mock_snapshot, manager):
+    """モデルダウンロードの異常系テスト"""
+    mock_snapshot.side_effect = Exception("Network error")
+    result = manager.download_model("test-model")
+    assert "Error downloading model" in result
+    assert "Network error" in result
+
+
 def test_launch_server_port_in_use(manager):
     with patch.object(manager, "is_port_in_use", return_value=True):
         result = manager.launch_server("test_model", 8080)
@@ -95,7 +127,6 @@ def test_launch_server_with_health_check_success(mock_cached, mock_vmem, mock_sl
         assert state["8080"]["pid"] == 9999
         assert state["8080"]["model"] == "test-model"
 
-        # 追加: sys.executable が正しく使われているかを厳密にテスト
         mock_popen.assert_called_once()
         args, _ = mock_popen.call_args
         called_cmd = args[0]
@@ -138,7 +169,6 @@ def test_launch_server_timeout_warning(mock_cached, mock_vmem, mock_sleep, mock_
     mock_popen.return_value = mock_proc
 
     with patch.object(manager, "is_port_in_use", return_value=False):
-        # ループを抜けるために時間を進めるシミュレーション
         with patch("time.time", side_effect=[0, 11]):
             result = manager.launch_server("test-model", 8080)
             assert "Warning: Port not yet listening" in result
@@ -215,7 +245,7 @@ def test_shutdown_server_not_found(manager):
 
 @patch("psutil.Process")
 def test_shutdown_server_no_such_process(mock_process, manager):
-    """プロセスが既にOS上に存在しない(NoSuchProcess)場合のクリーンアップテスト"""
+    """プロセスが既にOS上に存在しない場合のクリーンアップテスト"""
     manager._save_state({"8080": {"pid": 12345, "model": "test"}})
     mock_process.side_effect = psutil.NoSuchProcess(12345)
     
@@ -247,7 +277,7 @@ def test_shutdown_server_timeout_expired(mock_process, manager):
 
 @patch("psutil.Process")
 def test_shutdown_server_general_exception(mock_process, manager):
-    """終了処理中に予期せぬエラー（権限不足等）が発生した場合のテスト"""
+    """終了処理中に予期せぬエラーが発生した場合のテスト"""
     manager._save_state({"8080": {"pid": 12345, "model": "test"}})
     mock_process.side_effect = Exception("Permission denied")
     
@@ -266,7 +296,6 @@ def test_get_running_servers(mock_pid_exists, manager):
         "8081": {"pid": 101, "model": "model-B"}, # 死んでる
     })
     
-    # pid 100はTrue、101はFalseを返すようにモック
     mock_pid_exists.side_effect = lambda pid: pid == 100
     
     servers = manager.get_running_servers()
@@ -275,6 +304,43 @@ def test_get_running_servers(mock_pid_exists, manager):
     assert "8081" not in servers
     assert len(servers) == 1
     
-    # 状態ファイルからも101が自動削除されているか確認
     state = manager._load_state()
     assert "8081" not in state
+
+
+@patch.object(MlxProcessManager, "shutdown_server")
+@patch.object(MlxProcessManager, "launch_server")
+@patch("time.sleep", return_value=None)
+def test_restart_server_success(mock_sleep, mock_launch, mock_shutdown, manager):
+    """再起動テスト（モデル名省略時、同じモデルを引き継ぐか）"""
+    manager._save_state({"8080": {"pid": 12345, "model": "old-model"}})
+    mock_shutdown.return_value = "Shut down OK"
+    mock_launch.return_value = "Launched OK"
+
+    result = manager.restart_server(8080)
+    
+    assert "Shut down OK" in result
+    assert "Launched OK" in result
+    mock_shutdown.assert_called_once_with(8080)
+    mock_launch.assert_called_once_with("old-model", 8080, 10, 4.0)
+
+
+@patch.object(MlxProcessManager, "shutdown_server")
+@patch.object(MlxProcessManager, "launch_server")
+@patch("time.sleep", return_value=None)
+def test_restart_server_with_new_model(mock_sleep, mock_launch, mock_shutdown, manager):
+    """再起動テスト（新しいモデル名指定時）"""
+    manager._save_state({"8080": {"pid": 12345, "model": "old-model"}})
+    mock_shutdown.return_value = "Shut down OK"
+    mock_launch.return_value = "Launched OK"
+
+    result = manager.restart_server(8080, model_name="new-model", memory_requirement_gb=5.0)
+    
+    mock_shutdown.assert_called_once_with(8080)
+    mock_launch.assert_called_once_with("new-model", 8080, 10, 5.0)
+
+
+def test_restart_server_not_found(manager):
+    """稼働していないポートの再起動テスト"""
+    result = manager.restart_server(8080)
+    assert "Error: No running server found" in result

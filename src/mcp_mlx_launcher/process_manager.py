@@ -4,8 +4,10 @@ import json
 import subprocess
 import psutil
 import time
+import platform
 from pathlib import Path
 from filelock import FileLock
+from huggingface_hub import snapshot_download
 
 
 class MlxProcessManager:
@@ -60,14 +62,23 @@ class MlxProcessManager:
 
     def is_model_cached(self, model_name: str) -> bool:
         """Hugging Faceのキャッシュディレクトリにモデルが存在するか確認する"""
-        # 環境変数 HF_HOME を尊重し、設定されていなければデフォルトパスを使用
         cache_base = os.environ.get("HF_HOME", "~/.cache/huggingface/hub")
         cache_dir = Path(cache_base).expanduser()
         
-        # 例: "mlx-community/Llama-3" -> "models--mlx-community--Llama-3"
         folder_name = "models--" + model_name.replace("/", "--")
         model_path = cache_dir / folder_name
         return model_path.exists()
+
+    def get_system_info(self) -> dict:
+        """現在のシステム状態（メモリ、アーキテクチャなど）を取得する"""
+        mem = psutil.virtual_memory()
+        return {
+            "system": platform.system(),
+            "machine": platform.machine(),
+            "total_memory_gb": round(mem.total / (1024 ** 3), 2),
+            "available_memory_gb": round(mem.available / (1024 ** 3), 2),
+            "python_version": platform.python_version()
+        }
 
     def get_running_servers(self) -> dict:
         """現在稼働中のサーバー一覧を取得し、死んだプロセスをクリーンアップする"""
@@ -80,7 +91,6 @@ class MlxProcessManager:
             if psutil.pid_exists(pid):
                 active_servers[port_str] = info
             else:
-                # ゾンビプロセスを検知して削除
                 del state[port_str]
                 changed = True
                 
@@ -89,23 +99,27 @@ class MlxProcessManager:
             
         return active_servers
 
+    def download_model(self, model_name: str) -> str:
+        """Hugging Faceからモデルを事前にダウンロード（キャッシュ）する"""
+        try:
+            snapshot_download(repo_id=model_name)
+            return f"Successfully downloaded and cached model: {model_name}"
+        except Exception as e:
+            return f"Error downloading model {model_name}: {str(e)}"
+
     def launch_server(self, model_name: str, port: int, timeout: int = 10, memory_requirement_gb: float = 4.0) -> str:
         """mlx_lm.server を起動し、生存とポートの開放を確認する"""
         
-        # ① 事前チェック: ポートの競合
         if self.is_port_in_use(port):
             return f"Error: Port {port} is already in use."
 
-        # ② 事前チェック: メモリ(OOM)クラッシュの予防 (指定されたGBの空きを要求)
         mem = psutil.virtual_memory()
         available_gb = mem.available / (1024 ** 3)
         if available_gb < memory_requirement_gb:
             return f"Error: Insufficient memory. Only {available_gb:.2f}GB available, but at least {memory_requirement_gb}GB is requested to launch this model safely."
 
-        # ③ モデルのキャッシュ確認
         is_cached = self.is_model_cached(model_name)
 
-        # ④ sys.executable を使用し、現在実行中のPythonインタープリタ（仮想環境）を確実に引き継ぐ
         cmd = [
             sys.executable,
             "-m",
@@ -124,24 +138,20 @@ class MlxProcessManager:
                 start_new_session=True,
             )
 
-            # 生存確認ループ (ヘルスチェック)
             start_time = time.time()
             is_verified = False
             
             while time.time() - start_time < timeout:
-                # 1. プロセスが即座にクラッシュしていないか確認
                 poll_result = process.poll()
                 if poll_result is not None:
                     return f"Error: Process exited immediately with code {poll_result}. Check if the model name is correct or if you have enough unified memory."
 
-                # 2. ポートがリッスン状態になったか確認
                 if self.is_port_in_use(port):
                     is_verified = True
                     break
                 
                 time.sleep(0.5)
 
-            # メッセージの出し分け
             if not is_verified:
                 if not is_cached:
                     msg_suffix = " (Note: Model is currently being downloaded from Hugging Face in the background. It may take a while before the port becomes active.)"
@@ -150,7 +160,6 @@ class MlxProcessManager:
             else:
                 msg_suffix = ""
 
-            # 状態を記録 (フォーマットを拡張)
             state = self._load_state()
             state[str(port)] = {"pid": process.pid, "model": model_name}
             self._save_state(state)
@@ -181,10 +190,34 @@ class MlxProcessManager:
         except Exception as e:
             return f"Error during shutdown: {str(e)}"
 
-        # クリーンアップ
         state = self._load_state()
         if port_str in state:
             del state[port_str]
             self._save_state(state)
 
         return f"Successfully shut down server on port {port} (PID: {pid})."
+
+    def restart_server(self, port: int, model_name: str = None, timeout: int = 10, memory_requirement_gb: float = 4.0) -> str:
+        """指定されたポートのサーバーを再起動する"""
+        state = self._load_state()
+        port_str = str(port)
+
+        if port_str not in state:
+            return f"Error: No running server found on port {port} to restart."
+
+        # モデル名が指定されていない場合は、現在のモデルを引き継ぐ
+        current_model = state[port_str].get("model", "unknown")
+        target_model = model_name if model_name else current_model
+
+        if target_model == "unknown":
+            return "Error: Cannot determine the current model to restart. Please specify model_name explicitly."
+
+        shutdown_msg = self.shutdown_server(port)
+        if "Error" in shutdown_msg:
+            return f"Failed to shutdown existing server: {shutdown_msg}"
+
+        # OSがポートを完全に解放するまで少し待機
+        time.sleep(1)
+
+        launch_msg = self.launch_server(target_model, port, timeout, memory_requirement_gb)
+        return f"{shutdown_msg}\nRestart Result: {launch_msg}"
