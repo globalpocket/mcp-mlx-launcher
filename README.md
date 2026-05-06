@@ -4,6 +4,8 @@ An MCP (Model Context Protocol) server designed to autonomously manage, launch, 
 
 This tool empowers AI agents (like Cline, Claude Desktop, etc.) to start local LLM servers on demand, check their status, prepare environments, and gracefully shut them down when no longer needed, saving system resources.
 
+> 💡 **Proven in Production:** This server was extracted as a general-purpose, reusable module from the [cingulater](https://github.com/globalpocket/cingulater) project, where it is actively used and running in production.
+
 ## Features
 
 - **System Environment Check**: Verify system memory and architecture (Apple Silicon) to ensure readiness.
